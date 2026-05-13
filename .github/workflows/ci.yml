@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@main
+      with:
+        extra-conf: |
+          system-features = kvm
+
+    - name: Enable Magic Nix Cache
+      uses: DeterminateSystems/magic-nix-cache-action@main
+
+    - name: Check Flake format
+      run: nix fmt -- --check .
+
+    - name: Run Nix flake check (VM Integration Tests)
+      run: nix flake check -L
+
+    - name: Build Rust binary
+      run: nix build .#nix-secret-bridge -L
+
+    - name: Build NixOS module test
+      run: nix build .#checks.x86_64-linux.default -L
