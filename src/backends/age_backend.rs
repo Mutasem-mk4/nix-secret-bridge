@@ -12,9 +12,15 @@ impl AgeBackend {
     pub fn new() -> Self { Self }
 
     fn parse_identities(key_content: &str) -> Result<Vec<Box<dyn age::Identity>>, BackendError> {
-        let identities = age::IdentityFile::from_buffer(key_content.as_bytes())
+        let identities: Vec<Box<dyn age::Identity>> = age::IdentityFile::from_buffer(key_content.as_bytes())
             .map_err(|e| BackendError::KeySourceError(format!("Failed to parse age identity: {}", e)))?
-            .into_identities();
+            .into_identities()
+            .into_iter()
+            .map(|entry| match entry {
+                age::IdentityFileEntry::Native(i) => Box::new(i) as Box<dyn age::Identity>,
+                age::IdentityFileEntry::Plugin(i) => Box::new(i) as Box<dyn age::Identity>,
+            })
+            .collect();
         if identities.is_empty() {
             return Err(BackendError::KeySourceError("No valid age identities found".into()));
         }
