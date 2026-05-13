@@ -17,6 +17,8 @@ call them out explicitly.
   paths and the vulnerable `rsa` transitive dependency.
 - Add explicit `CAP_IPC_LOCK` to the NixOS service so fail-closed memory locking
   works in installer VM tests.
+- Add a systemd tmpfs mount unit for decrypted bootstrap secrets and remove
+  `CAP_SYS_ADMIN` from the decrypt service.
 
 ## 0.1.0 - 2026-05-13
 

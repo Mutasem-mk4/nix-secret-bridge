@@ -248,6 +248,18 @@ in
           --allow-missing-inputs
       '';
 
+      systemd.mounts = [
+        {
+          description = "tmpfs for nix-secret-bridge decrypted bootstrap secrets";
+          what = "tmpfs";
+          where = cfg.mountBase;
+          type = "tmpfs";
+          options = "mode=0700,size=1m,noswap,nodev,noexec,nosuid";
+          before = [ "nix-secret-bridge.service" ];
+          requiredBy = [ "nix-secret-bridge.service" ];
+        }
+      ];
+
       systemd.services.nix-secret-bridge = {
         description = "Decrypt bootstrap secrets for disko";
         documentation = [ "file:${./doc/manual.md}" ];
@@ -272,15 +284,11 @@ in
             cfg.mountBase
           ];
           CapabilityBoundingSet = [
-            "CAP_SYS_ADMIN"
             "CAP_DAC_OVERRIDE"
             "CAP_FOWNER"
             "CAP_IPC_LOCK"
           ];
-          AmbientCapabilities = [
-            "CAP_SYS_ADMIN"
-            "CAP_IPC_LOCK"
-          ];
+          AmbientCapabilities = [ "CAP_IPC_LOCK" ];
           NoNewPrivileges = false;
           PrivateTmp = true;
           ProtectHome = true;

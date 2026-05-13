@@ -131,10 +131,25 @@ let
     };
 
   testScript = ''
+    def dump_bridge_diagnostics():
+        machine.succeed("systemctl status nix-secret-bridge.service --no-pager || true")
+        machine.succeed("journalctl -u nix-secret-bridge.service --no-pager || true")
+        machine.succeed("systemctl status disko.service --no-pager || true")
+        machine.succeed("journalctl -u disko.service --no-pager || true")
+        machine.succeed("findmnt /run/secrets-bridge || true")
+        machine.succeed("ls -la /run/secrets-bridge || true")
+
+    def wait_for_unit_or_dump(unit):
+        try:
+            machine.wait_for_unit(unit)
+        except Exception:
+            dump_bridge_diagnostics()
+            raise
+
     machine.start()
-    machine.wait_for_unit("multi-user.target")
-    machine.wait_for_unit("nix-secret-bridge.service")
-    machine.wait_for_unit("disko.service")
+    wait_for_unit_or_dump("multi-user.target")
+    wait_for_unit_or_dump("nix-secret-bridge.service")
+    wait_for_unit_or_dump("disko.service")
 
     machine.succeed("test -f ${bridgePath}")
     machine.succeed("stat -c '%a' ${bridgePath} | grep -qx 400")

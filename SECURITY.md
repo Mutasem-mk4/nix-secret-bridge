@@ -44,6 +44,7 @@ coordinated disclosure requires a different timeline.
 4. **NixOS Module Hardening**:
    - Master decryption keys are referenced by runtime paths under `/run` or by a runtime environment file. They must not be imported as Nix paths.
    - The module asserts at evaluation time that your master key file is **not** accidentally copied into the world-readable `/nix/store/`.
+   - A systemd mount unit creates the tmpfs handoff directory before decryption, so the decrypt service does not need `CAP_SYS_ADMIN`.
    - Execution occurs under `ProtectSystem=strict`, `MemoryDenyWriteExecute=true`, explicit `CAP_IPC_LOCK` for memory locking, and locked down standard output (`StandardOutput=null`) to prevent logging leakage.
 
 ## Current Limitations
@@ -55,5 +56,5 @@ coordinated disclosure requires a different timeline.
 
 ## Out of Scope (Assumptions)
 
-- **Rootkit/Installer Compromise**: `nix-secret-bridge` runs as root in the installer environment to mount tmpfs and supply secrets to block devices. It assumes the installer ISO/environment is fundamentally trustworthy. If your installer environment is compromised, privileged malware can observe plaintext secrets.
+- **Rootkit/Installer Compromise**: `nix-secret-bridge` runs as root in the installer environment to supply secrets to block devices. It assumes the installer ISO/environment is fundamentally trustworthy. If your installer environment is compromised, privileged malware can observe plaintext secrets.
 - **Hardware-level attacks**: Cold boot attacks or malicious hardware (e.g., hardware keyloggers for interactive passphrase entry, malicious DMA attacks) are outside the scope of software-based protections.
