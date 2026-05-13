@@ -10,7 +10,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write
+      
     steps:
     - uses: actions/checkout@v4
 
@@ -22,6 +24,17 @@ jobs:
 
     - name: Enable Magic Nix Cache
       uses: DeterminateSystems/magic-nix-cache-action@main
+
+    - name: Generate and commit Cargo.lock (if missing)
+      run: |
+        if [ ! -f Cargo.lock ]; then
+          cargo generate-lockfile
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: auto-generate Cargo.lock"
+          git push
+        fi
 
     - name: Check Flake format
       run: nix fmt -- --check .
