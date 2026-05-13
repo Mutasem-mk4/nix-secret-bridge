@@ -74,9 +74,6 @@
             statix
           ];
         };
-        
-        # ── Formatter ──────────────────────────────────────────────
-        formatter = pkgs.nixpkgs-fmt;
       }
     );
 }
