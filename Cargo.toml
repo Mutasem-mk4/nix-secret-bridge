@@ -1,0 +1,62 @@
+[package]
+name = "nix-secret-bridge"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mutasem Kharma <mutasem@kharma.dev>"]
+license = "MIT"
+description = "Bootstrap secret orchestrator for NixOS: decrypt secrets during disk partitioning before system boot"
+repository = "https://github.com/nix-community/nix-secret-bridge"
+readme = "README.md"
+keywords = ["nixos", "secrets", "luks", "disko", "encryption"]
+categories = ["command-line-utilities", "cryptography"]
+
+# Abort on panic to prevent secret leakage through stack unwinding
+[profile.release]
+panic = "abort"
+lto = true
+strip = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# age decryption (pure Rust implementation of age)
+rage = { version = "0.10", features = ["ssh"] }
+age = { version = "0.10", features = ["ssh"] }
+
+# Memory zeroization for secret data
+zeroize = { version = "1", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging (sanitized — never logs secrets)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Unix-specific: mlock, prctl, mount
+nix = { version = "0.29", features = ["mount", "mman", "process", "fs"] }
+
+# Serialization for config parsing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Secure temporary files
+tempfile = "3"
+
+# Find executables in PATH (for SOPS backend)
+which = "7"
+
+# RAII cleanup guards (for temporary key files)
+scopeguard = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
