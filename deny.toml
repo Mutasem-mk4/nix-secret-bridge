@@ -1,0 +1,25 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+skip = [
+  { crate = "getrandom@0.2.17", reason = "age/rand currently depends on getrandom 0.2 while tempfile uses getrandom 0.4" },
+  { crate = "rustc-hash@1.1.0", reason = "transitive age i18n dependency still uses rustc-hash 1.x" },
+  { crate = "thiserror@1.0.69", reason = "transitive age i18n dependency still uses thiserror 1.x" },
+  { crate = "thiserror-impl@1.0.69", reason = "transitive age i18n dependency still uses thiserror 1.x" },
+  { crate = "wit-bindgen@0.51.0", reason = "transitive WASI dependency also appears through getrandom 0.4" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

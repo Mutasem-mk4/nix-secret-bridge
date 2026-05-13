@@ -21,7 +21,7 @@ codegen-units = 1
 panic = "abort"
 
 [dependencies]
-age = { version = "0.11.3", features = ["armor", "plugin", "ssh"] }
+age = { version = "0.11.3", features = ["armor"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 nix = { version = "0.31.3", features = ["fs", "mman", "mount", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }

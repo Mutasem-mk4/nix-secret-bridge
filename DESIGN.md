@@ -48,7 +48,7 @@ writing decrypted material to persistent storage.
 │  │              nix-secret-bridge CLI                        │   │
 │  │                                                          │   │
 │  │  1. Parse secret mapping (config or CLI args)            │   │
-│  │  2. Select backend (age | sops | plugin)                 │   │
+│  │  2. Select backend (age | sops)                          │   │
 │  │  3. Decrypt in-memory (Vec<u8>)                          │   │
 │  │  4. Mount tmpfs at /run/secrets-bridge/                  │   │
 │  │  5. Write decrypted bytes (mode 0400, root:root)         │   │
@@ -178,9 +178,10 @@ configuration:
 |--------|-----------|----------|
 | Environment variable | `NIX_SECRET_BRIDGE_AGE_KEY` | CI/CD, automated deployments |
 | File path | `--master-key-file /tmp/age-key.txt` | `nixos-anywhere` copying key via SSH |
-Hardware-backed age identities are planned as an explicitly tested deployment
-path, but the initial implementation only documents and tests runtime file and
-environment-based key sources.
+Hardware-backed age plugin identities and SSH age identities are deliberately
+out of scope for the initial native age backend. They should only be enabled
+after automated tests cover unattended installer execution and the extra
+dependency surface has been reviewed.
 
 ---
 
@@ -224,7 +225,7 @@ nix-secret-bridge
 │   ├── mod.rs          # Backend trait definition
 │   ├── age.rs          # age/rage decryption
 │   ├── sops.rs         # sops decryption
-│   └── plugin.rs       # External plugin support (future)
+│   └── plugin.rs       # External plugin support (future, not implemented)
 ├── mount.rs            # tmpfs mounting and file writing
 ├── cleanup.rs          # Secure cleanup logic
 └── main.rs             # CLI entry point

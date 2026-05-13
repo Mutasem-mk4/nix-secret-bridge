@@ -127,9 +127,10 @@ The tested key-source paths are a runtime age identity file under `/run` and
 runtime environment variables passed through the deployment wrapper. Do not
 import plaintext identity files as Nix paths.
 
-Hardware-backed age identities are a planned tested deployment path. They should
-only be used after verifying that the required age plugin is available in the
-installer environment and works under unattended systemd execution.
+Hardware-backed age plugin identities and SSH age identities are intentionally
+not part of the initial native age backend. They add dependency surface and
+should only be enabled after automated tests cover unattended installer
+execution.
 
 TPM2 sealing is intentionally not part of the first implementation. TPM2 is
 better suited for subsequent boots or redeployments after the target hardware
@@ -172,5 +173,5 @@ The bridge enforces these properties:
 - The systemd unit suppresses stdout and only logs sanitized errors.
 
 Encrypted files may be stored in the Nix store. Master keys and decrypted LUKS
-keys must be delivered at runtime through `/run`, SSH, or a protected hardware
-provider.
+keys must be delivered at runtime through `/run`, SSH transport, or another
+deployment-time secret transfer mechanism.

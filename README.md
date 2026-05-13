@@ -1,5 +1,7 @@
 # nix-secret-bridge
 
+[![CI](https://github.com/Mutasem-mk4/nix-secret-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Mutasem-mk4/nix-secret-bridge/actions/workflows/ci.yml)
+
 `nix-secret-bridge` provides encrypted bootstrap secrets to `disko` during the
 installer phase of a NixOS deployment. It exists for the case where an encrypted
 disk needs a LUKS key before the target system has booted and before normal
@@ -83,9 +85,16 @@ pkgs/by-name/ni/...          nixpkgs package layout copy
 
 ```bash
 cargo fmt --check
+cargo clippy --locked -- -D warnings
 cargo test --locked
+cargo deny check advisories bans sources
 nix flake check -L
 ```
 
 The package supports Linux. The VM tests require Nix with QEMU support and are
 intended to run on Linux builders.
+
+Security-sensitive changes should update [SECURITY.md](SECURITY.md) when they
+change the threat model, supported guarantees, or vulnerability handling. Tagged
+releases follow [RELEASE.md](RELEASE.md), and notable changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
