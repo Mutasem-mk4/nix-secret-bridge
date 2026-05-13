@@ -175,6 +175,14 @@ in
             configured. Add entries to services.nix-secret-bridge.secretMapping.
           '';
         }
+        {
+          assertion = cfg.provider.masterKeyPath == null || !(lib.hasPrefix builtins.storeDir (toString cfg.provider.masterKeyPath));
+          message = ''
+            nix-secret-bridge: `masterKeyPath` must not be a file in the Nix store!
+            Putting your master key in the Nix store exposes it to all local users
+            and breaks the confidentiality of the entire secret bridging process.
+          '';
+        }
       ];
 
       # Ensure required packages are available
@@ -193,9 +201,12 @@ in
           Type = "oneshot";
           RemainAfterExit = true;
 
+          LoadCredential = lib.optional (cfg.provider.masterKeyPath != null)
+            "master_key:${toString cfg.provider.masterKeyPath}";
+
           ExecStart = let
             masterKeyArg = lib.optionalString (cfg.provider.masterKeyPath != null)
-              "--master-key-file ${toString cfg.provider.masterKeyPath}";
+              "--master-key-file %d/master_key";
           in
             "${bridgePkg}/bin/nix-secret-bridge decrypt-all "
             + "--mapping-file ${secretMappingJson} "
@@ -215,14 +226,8 @@ in
           ProtectControlGroups = true;
           RestrictSUIDSGID = true;
           MemoryDenyWriteExecute = true;
+          LimitMEMLOCK = "infinity"; # Allow memory locking for secure buffer wiping
         };
-
-        # Pass through key environment variables
-        environment = lib.mkMerge [
-          (lib.mkIf (cfg.provider.masterKeyPath != null) {
-            NIX_SECRET_BRIDGE_MASTER_KEY_FILE = toString cfg.provider.masterKeyPath;
-          })
-        ];
 
         unitConfig = {
           # Don't retry on failure — fail loudly so the user knows
