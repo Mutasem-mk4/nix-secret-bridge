@@ -123,11 +123,13 @@ The SOPS backend invokes `sops --decrypt --output-type binary`. The module adds
 
 ## Advanced Key Sources
 
-YubiKey-backed age identities work when the identity file contains an
-`age-plugin-yubikey` identity and the corresponding plugin is available in the
-installer environment. This keeps the same interface: set `masterKeyPath` to the
-plugin identity file and ensure the hardware token is accessible during
-deployment.
+The tested key-source paths are a runtime age identity file under `/run` and
+runtime environment variables passed through the deployment wrapper. Do not
+import plaintext identity files as Nix paths.
+
+Hardware-backed age identities are a planned tested deployment path. They should
+only be used after verifying that the required age plugin is available in the
+installer environment and works under unattended systemd execution.
 
 TPM2 sealing is intentionally not part of the first implementation. TPM2 is
 better suited for subsequent boots or redeployments after the target hardware

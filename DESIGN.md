@@ -38,8 +38,8 @@ writing decrypted material to persistent storage.
 │  │  Secret Files        │     │  ┌─────────────────────┐     │   │
 │  │  (.age / .sops.yaml) │     │  │ ENV var             │     │   │
 │  │                      │     │  │ --master-key-file   │     │   │
-│  │  (from repo / flake) │     │  │ YubiKey (PIV/FIDO2) │     │   │
-│  └──────────┬───────────┘     │  │ Interactive prompt  │     │   │
+│  │  (from repo / flake) │     │  │ runtime file/env    │     │   │
+│  └──────────┬───────────┘     │  │ sources             │     │   │
 │             │                 │  └──────────┬──────────┘     │   │
 │             │                 └─────────────┼────────────────┘   │
 │             │                               │                    │
@@ -86,7 +86,7 @@ writing decrypted material to persistent storage.
 ```mermaid
 graph TD
     A["User's Encrypted Repo<br/>(*.age / *.sops.yaml)"] --> C
-    B["Master Key<br/>(ENV / file / YubiKey)"] --> C
+    B["Master Key<br/>(ENV / runtime file)"] --> C
     C["nix-secret-bridge CLI"] --> D
     D["/run/secrets-bridge/<br/>(tmpfs, noswap, noexec)"]
     D --> E["disko luksFormat<br/>(reads keyFile)"]
@@ -165,7 +165,7 @@ configuration:
 | 3 | `nix-secret-bridge` | Reads config: finds `luks-key.age` mapped to `/run/secrets-bridge/luks-key` |
 | 4 | `nix-secret-bridge` | Locates the master key from `$NIX_SECRET_BRIDGE_AGE_KEY` or `--master-key-file` |
 | 5 | `nix-secret-bridge` | Calls `rage::decrypt()` (age backend) or `sops --decrypt` (sops backend) |
-| 6 | `nix-secret-bridge` | Mounts a dedicated tmpfs at `/run/secrets-bridge/` with `noswap,noexec,nosuid,size=1m` |
+| 6 | `nix-secret-bridge` | Mounts a dedicated tmpfs at `/run/secrets-bridge/` with `noswap,noexec,nosuid,size=1m` when supported, falling back without `noswap` on older kernels |
 | 7 | `nix-secret-bridge` | Writes decrypted bytes to `/run/secrets-bridge/luks-key` with mode `0400`, owner `root:root` |
 | 8 | `nix-secret-bridge` | Zeroizes the in-memory buffer using the `zeroize` crate |
 | 9 | `disko` | `disko.service` starts, reads `/run/secrets-bridge/luks-key`, calls `cryptsetup luksFormat` |
@@ -178,8 +178,9 @@ configuration:
 |--------|-----------|----------|
 | Environment variable | `NIX_SECRET_BRIDGE_AGE_KEY` | CI/CD, automated deployments |
 | File path | `--master-key-file /tmp/age-key.txt` | `nixos-anywhere` copying key via SSH |
-| YubiKey | `--yubikey` (via `age-plugin-yubikey`) | Hardware-backed, interactive |
-| Interactive prompt | `--interactive` | Manual installs |
+Hardware-backed age identities are planned as an explicitly tested deployment
+path, but the initial implementation only documents and tests runtime file and
+environment-based key sources.
 
 ---
 
@@ -190,7 +191,7 @@ configuration:
 | Threat | Mitigation |
 |--------|-----------|
 | Secret persisted to disk | Decrypted data exists only on tmpfs (`noswap`). Never written to `/nix/store` or any persistent filesystem. |
-| Secret in swap | tmpfs mounted with `noswap` (Linux 6.x). Process memory locked via `mlock()`. |
+| Secret in swap | tmpfs mounted with `noswap` where supported. Decrypt operations fail unless process memory is locked with `mlockall(MCL_CURRENT | MCL_FUTURE)`. |
 | Secret in logs | `nix-secret-bridge` never logs decrypted content. All log messages are sanitized. `StandardOutput=null` on the systemd unit. |
 | Secret in core dump | `prctl(PR_SET_DUMPABLE, 0)` set at process start. |
 | Secret in `/nix/store` | Encrypted files may be in the store (this is fine — they're encrypted). Decrypted content is never part of a derivation output. |
@@ -201,13 +202,14 @@ configuration:
 
 - All decrypted byte buffers are wrapped in `zeroize::Zeroizing<Vec<u8>>`.
 - On drop, the buffer is overwritten with zeros before deallocation.
-- `mlock()` is called on the buffer to prevent swapping.
+- `mlockall(MCL_CURRENT | MCL_FUTURE)` is called before decrypting secret material.
 - The Rust binary is compiled with `panic = "abort"` to prevent unwinding from
   leaking stack frames.
 
 ### 4.3 Filesystem Safety
 
 - The tmpfs mount is created with: `mount -t tmpfs -o size=1m,noswap,noexec,nosuid,nodev,mode=0700 none /run/secrets-bridge`
+- On kernels that reject `noswap`, the tool falls back to `size=1m,noexec,nosuid,nodev,mode=0700` after process memory has been locked.
 - Individual secret files are written with mode `0400` (read-only by root).
 - Cleanup overwrites file content with zeros before unlinking.
 - The tmpfs is unmounted after cleanup, ensuring no residual data.

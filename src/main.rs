@@ -12,7 +12,7 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::info;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -122,7 +122,8 @@ fn main() -> ExitCode {
 
     if cli.command.requires_secret_memory_hardening() {
         if let Err(err) = security::harden_process() {
-            warn!("process hardening is incomplete: {err}");
+            eprintln!("nix-secret-bridge: process hardening failed: {err}");
+            return ExitCode::FAILURE;
         }
     }
 
