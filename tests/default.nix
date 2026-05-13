@@ -22,7 +22,7 @@ let
   prepareAgeSecret = pkgs.writeShellScript "prepare-age-secret" ''
     set -eu
     install -m 0700 -d ${runtimeDir}
-    ${pkgs.openssl}/bin/openssl rand -hex 32 > ${runtimeDir}/plain
+    ${pkgs.openssl}/bin/openssl rand -hex 64 | ${pkgs.coreutils}/bin/head -c 128 > ${runtimeDir}/plain
     ${pkgs.age}/bin/age --encrypt \
       --recipient ${lib.escapeShellArg testAgePublicKey} \
       --output ${runtimeDir}/luks-key.age \
@@ -32,7 +32,7 @@ let
   prepareSopsSecret = pkgs.writeShellScript "prepare-sops-secret" ''
     set -eu
     install -m 0700 -d ${runtimeDir}
-    ${pkgs.openssl}/bin/openssl rand -hex 32 > ${runtimeDir}/plain
+    ${pkgs.openssl}/bin/openssl rand -hex 64 | ${pkgs.coreutils}/bin/head -c 128 > ${runtimeDir}/plain
     ${pkgs.sops}/bin/sops --encrypt \
       --age ${lib.escapeShellArg testAgePublicKey} \
       --input-type binary \
