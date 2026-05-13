@@ -33,6 +33,7 @@ pub enum BridgeError {
         source: serde_json::Error,
     },
 
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(String),
 }

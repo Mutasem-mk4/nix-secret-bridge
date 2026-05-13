@@ -44,7 +44,7 @@ coordinated disclosure requires a different timeline.
 4. **NixOS Module Hardening**:
    - Master decryption keys are referenced by runtime paths under `/run` or by a runtime environment file. They must not be imported as Nix paths.
    - The module asserts at evaluation time that your master key file is **not** accidentally copied into the world-readable `/nix/store/`.
-   - Execution occurs under `ProtectSystem=strict`, `MemoryDenyWriteExecute=true`, and with locked down standard output (`StandardOutput=null`) to prevent logging leakage.
+   - Execution occurs under `ProtectSystem=strict`, `MemoryDenyWriteExecute=true`, explicit `CAP_IPC_LOCK` for memory locking, and locked down standard output (`StandardOutput=null`) to prevent logging leakage.
 
 ## Current Limitations
 

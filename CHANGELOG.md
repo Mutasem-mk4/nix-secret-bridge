@@ -15,6 +15,8 @@ call them out explicitly.
   registries, and wildcard dependencies.
 - Remove unused age SSH/plugin features to avoid carrying unsupported key-source
   paths and the vulnerable `rsa` transitive dependency.
+- Add explicit `CAP_IPC_LOCK` to the NixOS service so fail-closed memory locking
+  works in installer VM tests.
 
 ## 0.1.0 - 2026-05-13
 

@@ -275,8 +275,12 @@ in
             "CAP_SYS_ADMIN"
             "CAP_DAC_OVERRIDE"
             "CAP_FOWNER"
+            "CAP_IPC_LOCK"
           ];
-          AmbientCapabilities = [ "CAP_SYS_ADMIN" ];
+          AmbientCapabilities = [
+            "CAP_SYS_ADMIN"
+            "CAP_IPC_LOCK"
+          ];
           NoNewPrivileges = false;
           PrivateTmp = true;
           ProtectHome = true;
