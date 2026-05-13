@@ -123,7 +123,10 @@ let
           pkgs.e2fsprogs
           pkgs.util-linux
         ];
-        serviceConfig.Type = "oneshot";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
         script = ''
           ${config.system.build.diskoScript}
         '';
