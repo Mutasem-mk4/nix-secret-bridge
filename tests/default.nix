@@ -70,7 +70,7 @@ in
   # ──────────────────────────────────────────────────────────────────
   # TEST 1: Age backend + disko LUKS encryption
   # ──────────────────────────────────────────────────────────────────
-  age-backend-disko = pkgs.nixosTest {
+  age-backend-disko = pkgs.testers.nixosTest {
     name = "nix-secret-bridge-age-backend";
 
     nodes.machine = { config, pkgs, ... }: {
@@ -170,7 +170,7 @@ in
   # ──────────────────────────────────────────────────────────────────
   # TEST 2: SOPS backend + disko LUKS encryption
   # ──────────────────────────────────────────────────────────────────
-  sops-backend-disko = pkgs.nixosTest {
+  sops-backend-disko = pkgs.testers.nixosTest {
     name = "nix-secret-bridge-sops-backend";
 
     nodes.machine = { config, pkgs, ... }: {
