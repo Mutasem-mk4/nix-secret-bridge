@@ -16,6 +16,7 @@ let
   '';
 
   runtimeDir = "/run/nix-secret-bridge-test";
+  runtimeIdentity = "${runtimeDir}/age-identity.txt";
   bridgePath = "/run/secrets-bridge/luks";
 
   prepareAgeSecret = pkgs.writeShellScript "prepare-age-secret" ''
@@ -70,10 +71,21 @@ let
 
       services.nix-secret-bridge = {
         enable = true;
-        masterKeyPath = toString testAgeIdentity;
+        masterKeyPath = runtimeIdentity;
         diskoIntegration = true;
         cleanupAfterDisko = false;
         secretMapping.luks.outputPath = bridgePath;
+      };
+
+      systemd.services.prepare-runtime-identity = {
+        description = "Copy test age identity into /run";
+        before = [ "nix-secret-bridge.service" ];
+        requiredBy = [ "nix-secret-bridge.service" ];
+        serviceConfig.Type = "oneshot";
+        script = ''
+          install -m 0700 -d ${runtimeDir}
+          install -m 0600 ${testAgeIdentity} ${runtimeIdentity}
+        '';
       };
 
       disko.devices.disk.test = {
