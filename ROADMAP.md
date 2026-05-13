@@ -1,79 +1,50 @@
-# Contribution Roadmap — nix-secret-bridge
+# Roadmap
 
-## Phase 1: Rust Core (Weeks 1–3)
+Current status: Phase 3 in progress. The Rust CLI, NixOS module, examples, and
+VM test definitions are present. Remaining work before upstream submission is
+external review, Hydra validation, and the formal RFC process.
 
-### Goals
-- [ ] Complete Rust crate with age and SOPS decryption backends
-- [ ] tmpfs mounting with hardened mount options
-- [ ] Secure cleanup (zeroize + unlink + umount)
-- [ ] CLI with `decrypt`, `decrypt-all`, and `cleanup` subcommands
-- [ ] Process hardening (mlock, prctl, panic=abort)
-- [ ] Unit tests for all backends and error paths
-- [ ] `cargo clippy` and `cargo fmt` clean
+## Phase 1: Prototyping
 
-### Deliverables
-- `Cargo.toml`, `src/` with all modules
-- `cargo test` passes
-- No `unwrap()` in production code paths
+- Define the bootstrap secret threat model and installer-environment scope.
+- Implement the Rust CLI with age and SOPS backends.
+- Mount `/run/secrets-bridge` as tmpfs and enforce output paths under it.
+- Zeroize decrypted buffers and call Linux process hardening primitives.
+- Provide `decrypt`, `decrypt-all`, `cleanup`, and `validate-mapping` commands.
 
----
+Status: complete.
 
-## Phase 2: NixOS Module + systemd Integration (Weeks 4–6)
+## Phase 2: NixOS Integration
 
-### Goals
-- [ ] NixOS module with full `mkOption` specification
-- [ ] systemd service: `nix-secret-bridge-installer.service`
-- [ ] systemd service: `nix-secret-bridge-cleanup.service`
-- [ ] disko integration via `Before=disko.service` ordering
-- [ ] `package.nix` for `pkgs/by-name` structure
-- [ ] `flake.nix` with `packages`, `nixosModules`, `checks` outputs
-- [ ] Nix expression formatting with `nixpkgs-fmt`
+- Package the Rust binary with `rustPlatform.buildRustPackage`.
+- Add the NixOS module under `services.nix-secret-bridge`.
+- Expose generated provider paths at `config.nix-secret-bridge.providers.*.paths`.
+- Order `nix-secret-bridge.service` before `disko.service`.
+- Add cleanup after `disko.service`.
+- Add a `pkgs/by-name/ni/nix-secret-bridge/package.nix` copy for nixpkgs review.
 
-### Deliverables
-- `module.nix` with all options documented
-- `package.nix` ready for nixpkgs submission
-- `flake.nix` with proper input follows
+Status: complete pending maintainer review.
 
----
+## Phase 3: Testing and Documentation
 
-## Phase 3: Testing + Documentation (Weeks 7–9)
+- Maintain VM integration tests for both age and SOPS backends.
+- Exercise the real handoff into `disko` with an encrypted disk.
+- Verify tmpfs placement, file permissions, cleanup, and absence of plaintext in
+  `/nix/store`.
+- Add manual-style documentation and nixos-anywhere examples.
+- Run `cargo test`, `nix flake check`, and the VM tests in CI.
 
-### Goals
-- [ ] NixOS VM test: age backend + disko LUKS
-- [ ] NixOS VM test: SOPS backend + disko LUKS
-- [ ] Tests verify: LUKS format success, store purity, cleanup
-- [ ] Tests run on Hydra (sandboxed, no network after inputs)
-- [ ] Manual documentation (Markdown, NixOS manual style)
-- [ ] In-code documentation (rustdoc for all public items)
-- [ ] README with quick start and architecture overview
+Status: in progress.
 
-### Deliverables
-- `tests/default.nix` with ≥2 passing VM tests
-- `doc/manual.md` for NixOS manual integration
-- `README.md` with badges and examples
+## Phase 4: RFC and nixpkgs Submission
 
----
+- Post the finalized RFC to the NixOS RFC repository when review indicates the
+  module belongs in the official module set.
+- Request review from `disko`, `nixos-anywhere`, NixOS module, and security
+  maintainers.
+- Submit the package under `pkgs/by-name/ni/nix-secret-bridge`.
+- Submit the NixOS module and manual entry in the same or a follow-up PR.
+- Address RFC 36 process requirements: clearly scoped motivation, alternatives,
+  compatibility impact, unresolved questions, and implementation status.
 
-## Phase 4: Community Process (Weeks 10–12)
-
-### Goals
-- [ ] Post Pre-RFC to NixOS Discourse
-- [ ] Incorporate community feedback (≥2 weeks comment period)
-- [ ] Submit formal RFC if required by scope
-- [ ] Submit PR to `nix-community` organization
-- [ ] Request review from disko/nixos-anywhere maintainers
-- [ ] Address review feedback
-- [ ] Merge into `nix-community` (stepping stone for nixpkgs)
-
-### Governance Checkpoints
-- [ ] Verify compliance with RFC 36 process
-- [ ] Reference 2024/2025 Community Survey data
-- [ ] Obtain ≥2 maintainer reviews
-- [ ] Pass Hydra CI for all supported platforms
-- [ ] `pkgs/by-name` structure validated
-
-### Success Criteria
-- PR merged into `nix-community/nix-secret-bridge`
-- Listed in awesome-nix under "Secret Management"
-- At least one external user reports successful deployment
-- Integration test green on Hydra for x86_64-linux and aarch64-linux
+Status: planned.

@@ -1,88 +1,78 @@
 {
-  description = "nix-secret-bridge: Bootstrap secret orchestrator for NixOS disk encryption";
+  description = "Bootstrap secret bridge for NixOS disko LUKS keys";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-
-    # For integration testing (optional)
     disko = {
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, disko }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      disko,
+    }:
     let
-      # The NixOS module — importable by consumers
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       nixosModule = import ./module.nix;
     in
     {
-      # ── NixOS module outputs ─────────────────────────────────────
       nixosModules.default = nixosModule;
       nixosModules.nix-secret-bridge = nixosModule;
 
-      # ── Overlay ──────────────────────────────────────────────────
-      overlays.default = final: prev: {
+      overlays.default = final: _prev: {
         nix-secret-bridge = final.callPackage ./package.nix { };
       };
-
-    } // flake-utils.lib.eachDefaultSystem (system:
+    }
+    // flake-utils.lib.eachSystem supportedSystems (
+      system:
       let
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ self.overlays.default ];
         };
+        integrationTests = import ./tests {
+          inherit pkgs;
+          nixosModules = self.nixosModules;
+          diskoModule = disko.nixosModules.disko;
+          diskoPackage = disko.packages.${system}.disko;
+        };
       in
       {
-        # ── Package ────────────────────────────────────────────────
         packages.default = pkgs.nix-secret-bridge;
         packages.nix-secret-bridge = pkgs.nix-secret-bridge;
 
-        # ── Integration tests ──────────────────────────────────────
-        checks = let
-          testLib = import ./tests {
-            inherit pkgs;
-            inherit (self) nixosModules;
-            diskoModule = disko.nixosModules.disko;
-          };
-        in {
-          inherit (testLib) age-backend-disko sops-backend-disko;
+        checks = {
+          rust-test = pkgs.nix-secret-bridge;
+          integration = integrationTests.integration;
+          age-backend-disko = integrationTests.age-backend-disko;
+          sops-backend-disko = integrationTests.sops-backend-disko;
         };
 
-        # ── Dev shell for contributors ─────────────────────────────
+        formatter = pkgs.nixfmt-rfc-style;
+
         devShells.default = pkgs.mkShell {
-          name = "nix-secret-bridge-dev";
           packages = with pkgs; [
-            # Rust toolchain
-            rustc
+            age
             cargo
             clippy
-            rustfmt
-            rust-analyzer
-
-            # Nix tooling
-            nixpkgs-fmt
-            statix
+            cryptsetup
             deadnix
-
-            # Runtime deps for testing
-            age
+            nixfmt-rfc-style
+            rust-analyzer
+            rustc
+            rustfmt
             sops
-
-            # Build deps
-            pkg-config
+            statix
           ];
-          shellHook = ''
-            echo "╔══════════════════════════════════════════════╗"
-            echo "║  nix-secret-bridge development shell         ║"
-            echo "║                                              ║"
-            echo "║  cargo build    — build the CLI              ║"
-            echo "║  cargo test     — run unit tests             ║"
-            echo "║  nix flake check — run integration tests     ║"
-            echo "║  nixpkgs-fmt .  — format Nix files           ║"
-            echo "╚══════════════════════════════════════════════╝"
-          '';
         };
         
         # ── Formatter ──────────────────────────────────────────────

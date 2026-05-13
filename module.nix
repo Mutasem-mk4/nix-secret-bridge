@@ -1,268 +1,323 @@
-# NixOS Module: nix-secret-bridge
-#
-# Provides bootstrap secret decryption for disko's disk encryption
-# phase. Runs in the installer environment BEFORE the target system
-# is booted, bridging the gap between encrypted secret files and
-# tools that need plaintext keys at format time.
-#
-# Security invariants:
-#   - Decrypted secrets exist ONLY on tmpfs (never /nix/store)
-#   - In-memory buffers are zeroized after use
-#   - tmpfs is mounted with noexec,nosuid,nodev,noswap
-#   - All secret files are mode 0400, owned by root
-#   - Cleanup service removes all traces after disko finishes
-
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.services.nix-secret-bridge;
-  inherit (lib) mkEnableOption mkOption mkIf mkMerge types;
 
-  # Type for a single secret mapping entry
+  inherit (lib)
+    attrValues
+    escapeShellArg
+    filterAttrs
+    literalExpression
+    mapAttrs
+    mapAttrs'
+    mkEnableOption
+    mkIf
+    mkMerge
+    mkOption
+    nameValuePair
+    optional
+    optionalString
+    types
+    ;
+
   secretMappingType = types.submodule {
     options = {
       encryptedFile = mkOption {
-        type = types.path;
+        type = types.either types.path types.str;
         description = ''
-          Path to the encrypted secret file (age-encrypted or SOPS-encrypted).
-          This file CAN be in the Nix store (it's encrypted, so that's safe).
+          Encrypted secret file. Repository-local age and SOPS files may live
+          in the Nix store because they contain ciphertext only. Runtime paths
+          such as /run/... are also accepted for VM tests and installer hooks.
         '';
-        example = "./secrets/luks-key.age";
+        example = literalExpression "./secrets/luks-key.age";
       };
 
       outputPath = mkOption {
         type = types.str;
         description = ''
-          Absolute path where the decrypted secret will be written on tmpfs.
-          This path will be consumed by disko or other tools.
+          Absolute path under services.nix-secret-bridge.mountBase where the
+          decrypted bytes are written on tmpfs.
         '';
-        example = "/run/secrets-bridge/luks-key";
+        example = "/run/secrets-bridge/luks";
       };
 
       backend = mkOption {
-        type = types.nullOr (types.enum [ "age" "sops" ]);
+        type = types.nullOr (types.enum [
+          "age"
+          "sops"
+        ]);
         default = null;
-        description = ''
-          Override the global backend for this specific secret.
-          If null, uses the global `services.nix-secret-bridge.backend` setting.
-        '';
+        description = "Optional per-secret backend override.";
       };
     };
   };
 
-  # Resolve the backend for a given secret entry
-  resolveBackend = entry:
-    if entry.backend != null then entry.backend else cfg.backend;
+  resolveBackend = entry: if entry.backend == null then cfg.backend else entry.backend;
 
-  # Generate the JSON mapping file consumed by the CLI's `decrypt-all`
-  secretMappingJson = pkgs.writeText "nix-secret-bridge-mapping.json"
-    (builtins.toJSON (lib.mapAttrs (name: entry: {
-      backend = resolveBackend entry;
-      encrypted_file = toString entry.encryptedFile;
-      output_path = entry.outputPath;
-    }) cfg.secretMapping));
+  masterKeyPath =
+    if cfg.masterKeyPath != null then cfg.masterKeyPath else cfg.provider.masterKeyPath;
 
-  # The nix-secret-bridge binary package
-  bridgePkg = cfg.package;
+  usesSops =
+    cfg.backend == "sops"
+    || lib.any (entry: resolveBackend entry == "sops") (attrValues cfg.secretMapping);
 
+  secretMappingJson = pkgs.writeText "nix-secret-bridge-mapping.json" (
+    builtins.toJSON (
+      mapAttrs (_name: entry: {
+        backend = resolveBackend entry;
+        encrypted_file = toString entry.encryptedFile;
+        output_path = entry.outputPath;
+      }) cfg.secretMapping
+    )
+  );
+
+  decryptCommand =
+    ''
+      ${cfg.package}/bin/nix-secret-bridge decrypt-all \
+        --mapping-file ${escapeShellArg secretMappingJson} \
+        --mount-base ${escapeShellArg cfg.mountBase} \
+        ${optionalString (masterKeyPath != null) "--master-key-file ${escapeShellArg masterKeyPath}"}
+    '';
+
+  providerPathsFor =
+    backend:
+    mapAttrs' (name: entry: nameValuePair name entry.outputPath) (
+      filterAttrs (_name: entry: resolveBackend entry == backend) cfg.secretMapping
+    );
 in
 {
-  # ────────────────────────────────────────────────────────────────
-  # OPTIONS
-  # ────────────────────────────────────────────────────────────────
+  options = {
+    services.nix-secret-bridge = {
+      enable = mkEnableOption "pre-disko bootstrap secret decryption";
 
-  options.services.nix-secret-bridge = {
-    enable = mkEnableOption "nix-secret-bridge bootstrap secret orchestrator";
+      package = mkOption {
+        type = types.package;
+        default = pkgs.nix-secret-bridge;
+        defaultText = "pkgs.nix-secret-bridge";
+        description = "nix-secret-bridge package to execute.";
+      };
 
-    package = mkOption {
-      type = types.package;
-      default = pkgs.nix-secret-bridge;
-      defaultText = "pkgs.nix-secret-bridge";
-      description = "The nix-secret-bridge package to use.";
-    };
+      backend = mkOption {
+        type = types.enum [
+          "age"
+          "sops"
+        ];
+        default = "age";
+        description = "Default backend for entries in secretMapping.";
+      };
 
-    backend = mkOption {
-      type = types.enum [ "age" "sops" ];
-      default = "age";
-      description = ''
-        Default decryption backend. Can be overridden per-secret in
-        `secretMapping.<name>.backend`.
+      secretMapping = mkOption {
+        type = types.attrsOf secretMappingType;
+        default = { };
+        description = ''
+          Mapping from logical secret names to encrypted sources and tmpfs
+          output paths. Decrypted data is never represented in the Nix module
+          value graph.
+        '';
+        example = literalExpression ''
+          {
+            luks = {
+              encryptedFile = ./secrets/luks-key.age;
+              outputPath = "/run/secrets-bridge/luks";
+            };
+          }
+        '';
+      };
 
-        - `age`: Uses the rage library (compatible with agenix)
-        - `sops`: Uses the sops CLI (compatible with sops-nix)
-      '';
-    };
-
-    secretMapping = mkOption {
-      type = types.attrsOf secretMappingType;
-      default = { };
-      description = ''
-        Mapping of secret names to their encrypted sources and output paths.
-        Each entry specifies an encrypted file and where the decrypted
-        result should be placed on tmpfs.
-      '';
-      example = lib.literalExpression ''
-        {
-          luks-key = {
-            encryptedFile = ./secrets/luks-key.age;
-            outputPath = "/run/secrets-bridge/luks-key";
-          };
-          luks-data-key = {
-            encryptedFile = ./secrets/data-key.age;
-            outputPath = "/run/secrets-bridge/data-key";
-          };
-        }
-      '';
-    };
-
-    provider = {
       masterKeyPath = mkOption {
-        type = types.nullOr types.path;
+        type = types.nullOr types.str;
         default = null;
         description = ''
-          Path to the master key file for non-interactive use.
-          If null, the tool will look for:
-          - NIX_SECRET_BRIDGE_AGE_KEY environment variable
-          - NIX_SECRET_BRIDGE_MASTER_KEY_FILE environment variable
-          - SOPS_AGE_KEY_FILE environment variable
+          Runtime path to the age identity file used by the age and SOPS
+          backends. Use a path under /run for nixos-anywhere deployments.
+          Do not point this option at a plaintext key in the source tree.
         '';
-        example = "/tmp/age-identity.txt";
+        example = "/run/nix-secret-bridge/age-identity.txt";
+      };
+
+      provider.masterKeyPath = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Deprecated compatibility alias for masterKeyPath. Prefer
+          services.nix-secret-bridge.masterKeyPath.
+        '';
+      };
+
+      environmentFile = mkOption {
+        type = types.nullOr types.str;
+        default = "/run/nix-secret-bridge/nix-secret-bridge.env";
+        description = ''
+          Optional runtime EnvironmentFile for the decrypt service. This can
+          provide NIX_SECRET_BRIDGE_AGE_KEY, SOPS_AGE_KEY, or SOPS_AGE_KEY_FILE
+          without putting secret material in the Nix store.
+        '';
+      };
+
+      diskoIntegration = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Order nix-secret-bridge.service before disko.service and make disko
+          require it. This is the default path for nixos-anywhere.
+        '';
+      };
+
+      cleanupAfterDisko = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Run nix-secret-bridge-cleanup.service after disko.service.";
+      };
+
+      mountBase = mkOption {
+        type = types.str;
+        default = "/run/secrets-bridge";
+        description = "Dedicated tmpfs mount for decrypted bootstrap secrets.";
       };
     };
 
-    diskoIntegration = mkOption {
-      type = types.bool;
-      default = true;
-      description = ''
-        Automatically hook into disko's pre-format phase via systemd
-        service ordering. When true, nix-secret-bridge-installer.service
-        will be ordered Before=disko.service and cleanup will run after.
-      '';
-    };
+    nix-secret-bridge.providers = {
+      age.paths = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        readOnly = true;
+        description = "Generated output paths for age-backed secrets.";
+      };
 
-    mountBase = mkOption {
-      type = types.str;
-      default = "/run/secrets-bridge";
-      description = ''
-        Base directory for the tmpfs mount where decrypted secrets
-        are placed. This directory is created and mounted automatically.
-      '';
-    };
-
-    cleanupAfterDisko = mkOption {
-      type = types.bool;
-      default = true;
-      description = ''
-        Whether to automatically clean up (zeroize + unmount) decrypted
-        secrets after disko finishes. Disable only if other services
-        need the secrets after partitioning.
-      '';
+      sops.paths = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        readOnly = true;
+        description = "Generated output paths for SOPS-backed secrets.";
+      };
     };
   };
 
-  # ────────────────────────────────────────────────────────────────
-  # IMPLEMENTATION
-  # ────────────────────────────────────────────────────────────────
-
   config = mkIf cfg.enable (mkMerge [
-    # ── Core: decrypt service ────────────────────────────────────
     {
       assertions = [
         {
           assertion = cfg.secretMapping != { };
+          message = "services.nix-secret-bridge.enable requires at least one secretMapping entry.";
+        }
+        {
+          assertion = !(cfg.masterKeyPath != null && cfg.provider.masterKeyPath != null);
           message = ''
-            services.nix-secret-bridge is enabled but no secrets are
-            configured. Add entries to services.nix-secret-bridge.secretMapping.
+            Set only services.nix-secret-bridge.masterKeyPath. The nested
+            provider.masterKeyPath alias is retained only for compatibility.
           '';
         }
         {
-          assertion = cfg.provider.masterKeyPath == null || !(lib.hasPrefix builtins.storeDir (toString cfg.provider.masterKeyPath));
+          assertion = lib.all (
+            entry:
+            lib.hasPrefix "${cfg.mountBase}/" entry.outputPath
+          ) (attrValues cfg.secretMapping);
           message = ''
-            nix-secret-bridge: `masterKeyPath` must not be a file in the Nix store!
-            Putting your master key in the Nix store exposes it to all local users
-            and breaks the confidentiality of the entire secret bridging process.
+            Every services.nix-secret-bridge.secretMapping.*.outputPath must
+            be under services.nix-secret-bridge.mountBase (${cfg.mountBase}).
+          '';
+        }
+        {
+          assertion =
+            masterKeyPath == null
+            || !(lib.hasPrefix builtins.storeDir (toString masterKeyPath));
+          message = ''
+            services.nix-secret-bridge.masterKeyPath must be a runtime path,
+            not a Nix store path. Put the age identity under /run and pass that
+            path instead.
           '';
         }
       ];
 
-      # Ensure required packages are available
-      environment.systemPackages = [ bridgePkg ]
-        ++ lib.optional (cfg.backend == "sops" ||
-            lib.any (e: resolveBackend e == "sops") (lib.attrValues cfg.secretMapping))
-          pkgs.sops;
+      environment.systemPackages = [
+        cfg.package
+      ] ++ optional usesSops pkgs.sops;
 
-      # Main decryption service — runs in the installer environment
-      systemd.services.nix-secret-bridge-installer = {
-        description = "nix-secret-bridge: Decrypt bootstrap secrets for disk encryption";
-        wantedBy = [ "multi-user.target" ];
+      nix-secret-bridge.providers.age.paths = providerPathsFor "age";
+      nix-secret-bridge.providers.sops.paths = providerPathsFor "sops";
 
-        # Security: suppress all output to prevent secret leakage
+      system.activationScripts.nix-secret-bridge-validate = ''
+        ${cfg.package}/bin/nix-secret-bridge validate-mapping \
+          --mapping-file ${escapeShellArg secretMappingJson} \
+          --mount-base ${escapeShellArg cfg.mountBase} \
+          --allow-missing-inputs
+      '';
+
+      systemd.services.nix-secret-bridge = {
+        description = "Decrypt bootstrap secrets for disko";
+        documentation = [ "file:${./doc/manual.md}" ];
+        wantedBy = mkIf (!cfg.diskoIntegration) [ "multi-user.target" ];
+        before = mkIf cfg.diskoIntegration [ "disko.service" ];
+        requiredBy = mkIf cfg.diskoIntegration [ "disko.service" ];
+        path = [ cfg.package ] ++ optional usesSops pkgs.sops;
+        script = decryptCommand;
+        environment = {
+          RUST_LOG = "warn";
+        };
+
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-
-          LoadCredential = lib.optional (cfg.provider.masterKeyPath != null)
-            "master_key:${toString cfg.provider.masterKeyPath}";
-
-          ExecStart = let
-            masterKeyArg = lib.optionalString (cfg.provider.masterKeyPath != null)
-              "--master-key-file %d/master_key";
-          in
-            "${bridgePkg}/bin/nix-secret-bridge decrypt-all "
-            + "--mapping-file ${secretMappingJson} "
-            + "--mount-base ${cfg.mountBase} "
-            + masterKeyArg;
-
-          # Hardening
+          EnvironmentFile = optional (cfg.environmentFile != null) "-${cfg.environmentFile}";
           StandardOutput = "null";
           StandardError = "journal";
+          UMask = "0077";
+          ReadWritePaths = [
+            "/run"
+            cfg.mountBase
+          ];
+          CapabilityBoundingSet = [
+            "CAP_SYS_ADMIN"
+            "CAP_DAC_OVERRIDE"
+            "CAP_FOWNER"
+          ];
+          AmbientCapabilities = [ "CAP_SYS_ADMIN" ];
+          NoNewPrivileges = false;
           PrivateTmp = true;
-          ProtectSystem = "strict";
-          ReadWritePaths = [ cfg.mountBase "/run" ];
-          NoNewPrivileges = false; # Need mount capability
           ProtectHome = true;
+          ProtectSystem = "strict";
           ProtectKernelTunables = true;
           ProtectKernelModules = true;
           ProtectControlGroups = true;
           RestrictSUIDSGID = true;
           MemoryDenyWriteExecute = true;
-          LimitMEMLOCK = "infinity"; # Allow memory locking for secure buffer wiping
-        };
-
-        unitConfig = {
-          # Don't retry on failure — fail loudly so the user knows
-          StartLimitIntervalSec = 0;
+          LimitMEMLOCK = "infinity";
         };
       };
     }
 
-    # ── disko integration: service ordering ──────────────────────
-    (mkIf cfg.diskoIntegration {
-      systemd.services.nix-secret-bridge-installer = {
-        before = [ "disko.service" ];
-        requiredBy = [ "disko.service" ];
-      };
-    })
-
-    # ── Cleanup service ──────────────────────────────────────────
-    (mkIf cfg.cleanupAfterDisko {
+    (mkIf (cfg.cleanupAfterDisko && cfg.diskoIntegration) {
       systemd.services.nix-secret-bridge-cleanup = {
-        description = "nix-secret-bridge: Securely clean up decrypted bootstrap secrets";
-
+        description = "Clean up bootstrap secrets after disko";
+        wantedBy = [ "disko.service" ];
+        after = [ "disko.service" ];
+        path = [ cfg.package ];
+        script = ''
+          ${cfg.package}/bin/nix-secret-bridge cleanup --mount-base ${escapeShellArg cfg.mountBase}
+        '';
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${bridgePkg}/bin/nix-secret-bridge cleanup --mount-base ${cfg.mountBase}";
-
           StandardOutput = "null";
           StandardError = "journal";
-        };
-
-        after = lib.mkIf cfg.diskoIntegration [ "disko.service" ];
-        wantedBy = lib.mkIf cfg.diskoIntegration [ "disko.service" ];
-
-        unitConfig = {
-          # Run cleanup even if disko fails
-          DefaultDependencies = false;
+          UMask = "0077";
+          ReadWritePaths = [
+            "/run"
+            cfg.mountBase
+          ];
+          CapabilityBoundingSet = [
+            "CAP_SYS_ADMIN"
+            "CAP_DAC_OVERRIDE"
+            "CAP_FOWNER"
+          ];
+          AmbientCapabilities = [ "CAP_SYS_ADMIN" ];
+          NoNewPrivileges = false;
+          ProtectSystem = "strict";
+          ProtectHome = true;
         };
       };
     })

@@ -1,119 +1,152 @@
-//! Secure cleanup: zeroize files, unlink, and unmount tmpfs
+use std::{
+    fs,
+    io::{Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-
-use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
 use nix::mount::{umount2, MntFlags};
-use tracing::{debug, info, warn};
 
-/// Securely clean up all secrets from the tmpfs mount
-///
-/// 1. Walk all files under the mount base
-/// 2. Overwrite each file's contents with zeros
-/// 3. Unlink (delete) each file
-/// 4. Unmount the tmpfs
-pub fn secure_cleanup(mount_base: &Path) -> Result<()> {
-    if !mount_base.exists() {
-        info!(path = %mount_base.display(), "Mount base does not exist, nothing to clean");
+use crate::error::{io_path, BridgeError, Result};
+
+pub fn secure_cleanup(
+    mount_base: &Path,
+    selected_path: Option<&Path>,
+    unmount: bool,
+) -> Result<()> {
+    if let Some(path) = selected_path {
+        secure_delete_path(path)?;
+    } else if mount_base.exists() {
+        let files = collect_secret_paths(mount_base)?;
+        for path in files {
+            secure_delete_path(&path)?;
+        }
+        remove_empty_dirs(mount_base)?;
+    }
+
+    if unmount && mount_base.exists() {
+        unmount_mount_base(mount_base)?;
+
+        match fs::remove_dir(mount_base) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) if is_directory_not_empty(&err) => {}
+            Err(err) => return Err(io_path("remove tmpfs mount point", mount_base, err)),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_mount_base(mount_base: &Path) -> Result<()> {
+    match umount2(mount_base, MntFlags::MNT_DETACH) {
+        Ok(()) => Ok(()),
+        Err(nix::errno::Errno::EINVAL) | Err(nix::errno::Errno::ENOENT) => Ok(()),
+        Err(err) => Err(BridgeError::Cleanup(format!(
+            "failed to unmount '{}': {err}",
+            mount_base.display()
+        ))),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unmount_mount_base(_mount_base: &Path) -> Result<()> {
+    Err(BridgeError::UnsupportedPlatform(
+        "tmpfs unmounting is only supported on Linux".to_string(),
+    ))
+}
+
+pub fn secure_delete_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            BridgeError::Cleanup(format!("secret path '{}' does not exist", path.display()))
+        } else {
+            io_path("inspect secret path", path, err)
+        }
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        fs::remove_file(path).map_err(|err| io_path("unlink symlink secret path", path, err))?;
         return Ok(());
     }
 
-    // Step 1: Find and securely delete all files
-    let files = collect_files(mount_base)?;
-    info!(count = files.len(), "Found secret files to clean up");
-
-    for file_path in &files {
-        if let Err(e) = secure_delete_file(file_path) {
-            warn!(
-                path = %file_path.display(),
-                error = %e,
-                "Failed to securely delete file (continuing cleanup)"
-            );
-        }
+    if !metadata.file_type().is_file() {
+        return Err(BridgeError::Cleanup(format!(
+            "refusing to securely delete non-regular path '{}'",
+            path.display()
+        )));
     }
 
-    // Step 2: Remove empty directories
-    remove_empty_dirs(mount_base)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|err| io_path("open secret for overwrite", path, err))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| io_path("seek secret for overwrite", path, err))?;
+    write_zeros(&mut file, metadata.len())
+        .map_err(|err| io_path("overwrite secret with zeros", path, err))?;
+    file.sync_all()
+        .map_err(|err| io_path("sync overwritten secret", path, err))?;
+    drop(file);
 
-    // Step 3: Unmount the tmpfs
-    match umount2(mount_base, MntFlags::MNT_DETACH) {
-        Ok(()) => info!(path = %mount_base.display(), "tmpfs unmounted"),
-        Err(e) => {
-            warn!(
-                path = %mount_base.display(),
-                error = %e,
-                "Failed to unmount tmpfs (may not have been mounted)"
-            );
-        }
-    }
-
-    // Step 4: Remove the mount point directory
-    if mount_base.exists() {
-        let _ = fs::remove_dir(mount_base);
-    }
-
-    info!("Secure cleanup complete");
+    fs::remove_file(path).map_err(|err| io_path("unlink secret", path, err))?;
     Ok(())
 }
 
-/// Overwrite a file with zeros, then unlink it
-fn secure_delete_file(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("Failed to stat: {}", path.display()))?;
-
-    let size = metadata.len() as usize;
-
-    // Overwrite with zeros
-    if size > 0 {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .with_context(|| format!("Failed to open for overwrite: {}", path.display()))?;
-
-        let zeros = vec![0u8; size];
-        file.write_all(&zeros)?;
-        file.sync_all()?;
-
-        debug!(path = %path.display(), size, "File overwritten with zeros");
+fn collect_secret_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if !dir.exists() {
+        return Ok(paths);
     }
 
-    // Unlink the file
-    fs::remove_file(path)
-        .with_context(|| format!("Failed to unlink: {}", path.display()))?;
+    for entry in fs::read_dir(dir).map_err(|err| io_path("read secret directory", dir, err))? {
+        let entry = entry.map_err(|err| io_path("read secret directory entry", dir, err))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|err| io_path("inspect secret path", &path, err))?;
 
-    info!(path = %path.display(), "File securely deleted");
-    Ok(())
-}
-
-/// Recursively collect all regular files under a directory
-fn collect_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut files = Vec::new();
-    if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(collect_files(&path)?);
-            } else if path.is_file() {
-                files.push(path);
-            }
+        if metadata.file_type().is_dir() {
+            paths.extend(collect_secret_paths(&path)?);
+        } else if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            paths.push(path);
         }
     }
-    Ok(files)
+
+    Ok(paths)
 }
 
-/// Remove empty directories under the mount base (bottom-up)
 fn remove_empty_dirs(dir: &Path) -> Result<()> {
-    if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.path().is_dir() {
-                remove_empty_dirs(&entry.path())?;
-                let _ = fs::remove_dir(entry.path());
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).map_err(|err| io_path("read cleanup directory", dir, err))? {
+        let entry = entry.map_err(|err| io_path("read cleanup directory entry", dir, err))?;
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_dirs(&path)?;
+            match fs::remove_dir(&path) {
+                Ok(()) => {}
+                Err(err) if is_directory_not_empty(&err) => {}
+                Err(err) => return Err(io_path("remove empty secret directory", &path, err)),
             }
         }
     }
+
     Ok(())
+}
+
+fn write_zeros(file: &mut fs::File, mut remaining: u64) -> std::io::Result<()> {
+    let zeros = [0_u8; 8192];
+    while remaining > 0 {
+        let n = remaining.min(zeros.len() as u64) as usize;
+        file.write_all(&zeros[..n])?;
+        remaining -= n as u64;
+    }
+    Ok(())
+}
+
+fn is_directory_not_empty(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(39) | Some(145))
 }

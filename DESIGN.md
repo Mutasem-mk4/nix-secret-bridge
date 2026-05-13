@@ -72,7 +72,7 @@ writing decrypted material to persistent storage.
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │           nix-secret-bridge --cleanup                    │   │
+│  │           nix-secret-bridge cleanup                      │   │
 │  │                                                          │   │
 │  │  1. Overwrite secret files with zeros                    │   │
 │  │  2. Unlink files                                         │   │
@@ -91,7 +91,7 @@ graph TD
     D["/run/secrets-bridge/<br/>(tmpfs, noswap, noexec)"]
     D --> E["disko luksFormat<br/>(reads keyFile)"]
     E --> F["LUKS Partition Created"]
-    F --> G["nix-secret-bridge --cleanup<br/>(zeroize + unmount)"]
+    F --> G["nix-secret-bridge cleanup<br/>(zeroize + unmount)"]
     G --> H["Secrets Gone<br/>(no trace on disk)"]
 
     style C fill:#e74c3c,stroke:#c0392b,color:#fff
@@ -161,7 +161,7 @@ configuration:
 | Step | Actor | Description |
 |------|-------|-------------|
 | 1 | `nixos-anywhere` | SSHs into the target machine, enters installer env |
-| 2 | systemd | Starts `nix-secret-bridge-installer.service` (ordered `Before=disko.service`) |
+| 2 | systemd | Starts `nix-secret-bridge.service` (ordered `Before=disko.service`) |
 | 3 | `nix-secret-bridge` | Reads config: finds `luks-key.age` mapped to `/run/secrets-bridge/luks-key` |
 | 4 | `nix-secret-bridge` | Locates the master key from `$NIX_SECRET_BRIDGE_AGE_KEY` or `--master-key-file` |
 | 5 | `nix-secret-bridge` | Calls `rage::decrypt()` (age backend) or `sops --decrypt` (sops backend) |
@@ -170,7 +170,7 @@ configuration:
 | 8 | `nix-secret-bridge` | Zeroizes the in-memory buffer using the `zeroize` crate |
 | 9 | `disko` | `disko.service` starts, reads `/run/secrets-bridge/luks-key`, calls `cryptsetup luksFormat` |
 | 10 | systemd | `nix-secret-bridge-cleanup.service` (ordered `After=disko.service`) triggers |
-| 11 | `nix-secret-bridge --cleanup` | Overwrites file contents with zeros, unlinks, unmounts tmpfs |
+| 11 | `nix-secret-bridge cleanup` | Overwrites file contents with zeros, unlinks, unmounts tmpfs |
 
 ### 3.3 Key Provisioning Methods
 
@@ -258,7 +258,7 @@ New backends can be added by:
 
 `nix-secret-bridge` integrates with `disko` via systemd ordering:
 
-- `nix-secret-bridge-installer.service` runs **before** `disko.service`
+- `nix-secret-bridge.service` runs **before** `disko.service`
 - `nix-secret-bridge-cleanup.service` runs **after** `disko.service`
 - The user's disko config references paths under `/run/secrets-bridge/`
 

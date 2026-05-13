@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.age text
+*.sh text eol=lf
+*.nix text eol=lf
+*.rs text eol=lf
+*.md text eol=lf

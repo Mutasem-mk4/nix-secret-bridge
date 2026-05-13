@@ -1,261 +1,135 @@
-# Pre-RFC: nix-secret-bridge — Bootstrap Secret Orchestration for NixOS Disk Encryption
-
-**Author**: Mutasem Kharma  
-**Date**: 2026-05-13  
-**Status**: Pre-RFC (seeking community feedback)  
-
----
+# RFC: nix-secret-bridge, bootstrap secrets for NixOS disk encryption
 
 ## Summary
 
-Introduce `nix-secret-bridge`, a Rust CLI tool and NixOS module that decrypts
-secrets during the disk partitioning phase (before system boot) so that `disko`
-can consume LUKS passwords and encryption keys — solving the "bootstrap secret
-paradox."
-
----
+Add `nix-secret-bridge`, a small Rust CLI and NixOS module that decrypts
+bootstrap secrets in the installer environment and exposes them on tmpfs before
+`disko.service` runs. This lets `disko` consume LUKS keys during initial disk
+formatting without placing plaintext secrets in `/nix/store` or persistent
+storage.
 
 ## Motivation
 
-### The Bootstrap Paradox
+NixOS users increasingly deploy encrypted machines with `disko` and
+`nixos-anywhere`. The disk formatter runs before the target system exists, while
+normal secret managers such as `sops-nix` and `agenix` run after boot. A LUKS
+key managed by those tools is therefore unavailable at the exact moment
+`cryptsetup luksFormat` needs it.
 
-Every NixOS user deploying full-disk encryption with `disko` hits the same wall:
+Current workarounds are unsatisfactory:
 
-```
-$ nixos-anywhere --flake .#myhost root@target
-...
-disko: formatting disk /dev/sda
-disko: creating LUKS partition 'cryptroot'
-cryptsetup: ERROR: Cannot read keyfile /run/secrets/luks-key.
-                   No such file or directory.
-disko: FAILED
-```
+- Put the key in Nix, which leaks plaintext into the store.
+- Paste the key manually over SSH, which breaks unattended deployment.
+- Write one-off shell hooks, which usually miss tmpfs isolation, cleanup,
+  ordering, or tests.
+- Copy plaintext keys with deployment tooling, which moves the problem outside
+  the module system.
 
-The failure is fundamental. `disko` runs `cryptsetup luksFormat --key-file
-/run/secrets/luks-key`, but `/run/secrets/luks-key` doesn't exist because:
-
-1. `sops-nix` / `agenix` are systemd services that activate **after boot**
-2. `disko` runs **before boot** — in the installer environment
-3. The target root filesystem doesn't exist yet (we're creating it)
-
-Users are forced into one of these workarounds:
-
-- **Manual**: SSH in, paste the key, partition manually, then run `nixos-install`
-- **Insecure**: Hard-code the key in the Nix configuration (plaintext in `/nix/store`)
-- **Fragile**: Write custom bash scripts that run before disko
-
-None of these are reproducible, secure, or declarative — the core values of NixOS.
-
-### Community Demand
-
-The 2024 Nix Community Survey and 2025 Ecosystem Report both highlight "secrets
-management" as the #1 pain point, with "disk encryption bootstrap" specifically
-called out in multiple Discourse threads:
-
-- [Discourse: LUKS + disko + sops-nix integration](https://discourse.nixos.org/t/...)
-- [GitHub: disko #347 — keyFile from encrypted source](https://github.com/nix-community/disko/issues/347)
-- [GitHub: nixos-anywhere #89 — secrets during partitioning](https://github.com/nix-community/nixos-anywhere/issues/89)
-
-### Strategic Alignment
-
-Per RFC 36 governance and the 2025 Technical Direction, `nix-secret-bridge`:
-
-- Follows the **modular design** principle (standalone tool, NixOS module, clean interfaces)
-- Maintains **Nix store purity** (no decrypted secrets in `/nix/store`)
-- Is **backend-agnostic** (age, SOPS, pluggable)
-- Requires **no re-keying** (uses existing keys from the user's repository)
-- Integrates with **existing tools** (`disko`, `nixos-anywhere`, `agenix`, `sops-nix`)
-
----
+The proposed bridge keeps the concerns separated: `disko` remains a disk
+declarator, existing age or SOPS files remain the encrypted source of truth, and
+the bridge provides only the pre-boot runtime handoff.
 
 ## Detailed Design
 
-### Architecture
+The module introduces `services.nix-secret-bridge` with these core options:
 
-`nix-secret-bridge` operates in three phases:
+- `enable`: enable the bridge.
+- `backend`: default backend, either `age` or `sops`.
+- `secretMapping`: attribute set mapping names to encrypted files and tmpfs
+  output paths.
+- `masterKeyPath`: runtime path to an age identity file.
+- `diskoIntegration`: when true, order the bridge before `disko.service`.
 
-```
-┌─ Installer Environment ────────────────────────────────────┐
-│                                                             │
-│  Phase 1: DECRYPT                                           │
-│  nix-secret-bridge-installer.service                       │
-│  Before=disko.service                                       │
-│                                                             │
-│  ┌─────────────┐    ┌────────────────┐    ┌──────────────┐ │
-│  │ *.age files  │ →  │ nix-secret-    │ →  │ /run/secrets │ │
-│  │ (encrypted)  │    │ bridge decrypt │    │ -bridge/     │ │
-│  │              │    │                │    │ (tmpfs 0400) │ │
-│  └─────────────┘    └────────────────┘    └──────┬───────┘ │
-│                                                   │         │
-│  Phase 2: CONSUME                                 │         │
-│  disko.service                                    │         │
-│                                                   ▼         │
-│  cryptsetup luksFormat --key-file /run/secrets-bridge/key   │
-│                                                             │
-│  Phase 3: CLEANUP                                           │
-│  nix-secret-bridge-cleanup.service                         │
-│  After=disko.service                                        │
-│                                                             │
-│  zeroize → unlink → umount                                  │
-└─────────────────────────────────────────────────────────────┘
-```
+The module also exposes generated paths under
+`config.nix-secret-bridge.providers.age.paths` and
+`config.nix-secret-bridge.providers.sops.paths`. Disk configurations can refer
+to those generated paths instead of duplicating strings.
 
-### Security Model
+At runtime:
 
-| Property | Implementation |
-|----------|---------------|
-| No persistent secrets | tmpfs with `noswap` flag |
-| No secrets in Nix store | Decryption at runtime only |
-| Memory safety | Rust + `zeroize` crate + `mlock()` |
-| No core dumps | `prctl(PR_SET_DUMPABLE, 0)` |
-| No log leakage | Sanitized logging, `StandardOutput=null` |
-| Race-free file creation | `O_EXCL | O_CREAT`, `fchmod` before write |
+1. `nix-secret-bridge.service` starts in the installer environment.
+2. The service runs `nix-secret-bridge decrypt-all`.
+3. The CLI reads encrypted age or SOPS files.
+4. The CLI reads the master key from `masterKeyPath`, an environment file, or
+   supported environment variables.
+5. The CLI calls `mlockall` and disables core dumps on Linux.
+6. The CLI mounts `/run/secrets-bridge` as tmpfs with `nodev`, `noexec`,
+   `nosuid`, and `noswap` when the kernel supports it.
+7. Decrypted bytes are written atomically under the tmpfs mount with mode
+   `0400`.
+8. `disko.service` runs after the secret is available.
+9. `nix-secret-bridge-cleanup.service` overwrites, unlinks, and unmounts the
+   tmpfs after `disko.service` completes.
 
-### NixOS Module Interface
+The implementation rejects output paths outside the tmpfs mount. Encrypted
+files may be Nix paths because they are ciphertext. Master keys are strings
+pointing to runtime paths so Nix does not import plaintext key files into the
+store.
 
-```nix
-services.nix-secret-bridge = {
-  enable = true;
-  backend = "age";  # or "sops"
+## Interaction With Existing Tools
 
-  secretMapping = {
-    luks-key = {
-      encryptedFile = ./secrets/luks-key.age;
-      outputPath = "/run/secrets-bridge/luks-key";
-    };
-  };
+`disko` consumes the generated key file path via its existing `settings.keyFile`
+interface. No disk schema changes are required.
 
-  provider.masterKeyPath = null;  # use env var
-  diskoIntegration = true;        # auto Before=disko.service
-};
-```
+`nixos-anywhere` remains responsible for reaching the installer environment.
+Users can place the age identity under `/run/nix-secret-bridge` before invoking
+deployment or use a runtime systemd environment file.
 
-### Full design document
+`agenix` and `sops-nix` remain post-boot secret managers. They can share the
+same encrypted source files and age identities, but they do not need to run
+during disk formatting.
 
-See [DESIGN.md](./DESIGN.md) in the repository for the complete architecture,
-security threat model, backend plugin system, and integration details.
+The SOPS backend shells out to `sops` because SOPS file format support and key
+service behavior are already maintained by the upstream binary.
 
----
+## Drawbacks
 
-## Interaction with Existing Tools
+The bridge adds another moving part to the installer environment. It also
+requires careful documentation because a misconfigured `masterKeyPath` can still
+point to a plaintext file that Nix imports into the store. The module mitigates
+this by making `masterKeyPath` a string and documenting `/run` as the expected
+location.
 
-| Tool | Relationship |
-|------|-------------|
-| **disko** | Complementary. `nix-secret-bridge` provides secrets that disko consumes. Integration via systemd ordering. |
-| **nixos-anywhere** | Complementary. nixos-anywhere establishes the SSH session; nix-secret-bridge handles secret decryption within it. |
-| **agenix** | Complementary. Same encrypted files and keys. agenix handles post-boot secrets; nix-secret-bridge handles pre-boot. |
-| **sops-nix** | Complementary. Same relationship as agenix. SOPS backend shells out to the `sops` CLI. |
-| **nixos-facter** | Future integration. Could use hardware facts (TPM2 PCR values) for key unsealing. |
+The first implementation handles age identities and SOPS age keys. Other KMS
+backends are intentionally deferred.
 
----
+## Alternatives
 
-## Alternatives Considered
+Patch `disko` to decrypt secrets directly. This couples disk declaration to
+secret management and expands `disko`'s security surface.
 
-### 1. Patching disko to decrypt secrets directly
+Use ad hoc pre-disko shell scripts. This works for individual users but does not
+provide a reusable module, hardened tmpfs handling, cleanup, or VM tests.
 
-**Rejected.** Mixing concerns: disko is a disk partitioning tool, not a secrets
-manager. Adding decryption to disko would increase its attack surface and
-maintenance burden. The modular approach (separate tool, clean interface) is
-more aligned with NixOS design principles.
+Use `nixos-anywhere --extra-files` with plaintext keys. This can be acceptable
+for local experiments but does not keep secrets encrypted at rest in the
+configuration repository.
 
-### 2. Using `age --decrypt` in a pre-disko script
-
-**Partially addressed.** This is essentially what `nix-secret-bridge` does, but
-in a principled way: with proper tmpfs mounting, zeroization, cleanup, NixOS
-module integration, and multiple backend support. The raw `age` approach lacks
-security hardening and integration with the NixOS module system.
-
-### 3. Copying secrets via SSH (nixos-anywhere --extra-files)
-
-**Insufficient.** This requires the plaintext secret to exist on the deployer's
-machine and be transmitted over SSH. It doesn't support encrypted-at-rest
-secrets in the repository, and doesn't provide cleanup or memory safety.
-
-### 4. Using systemd-creds
-
-**Future work.** `systemd-creds` (systemd 250+) provides encrypted credentials
-tied to the machine's TPM2. This is compelling but doesn't solve the initial
-bootstrap: the machine doesn't have a TPM-sealed credential store until after
-the first boot. `nix-secret-bridge` could be extended to seal secrets into
-systemd-creds after the first boot.
-
----
+Use TPM2 or `systemd-creds` for the first deployment. These are promising for
+subsequent boots, but initial provisioning still needs a way to get the first
+secret onto the machine before the encrypted root exists.
 
 ## Unresolved Questions
 
-1. **TPM2 integration via nixos-facter**: Should `nix-secret-bridge` support
-   TPM2-sealed keys for re-deployment scenarios where the hardware is known?
+- Should TPM2 unsealing be added as a first-class backend after the initial age
+  and SOPS implementation is merged?
+- Should the official NixOS module expose a higher-level disko helper for common
+  encrypted-root layouts, or should it stay as a path provider only?
+- Should cleanup default to running even when `disko.service` fails, or should
+  operators be able to preserve the tmpfs for emergency debugging?
+- Should the module live in nixpkgs immediately or incubate in nix-community
+  until more deployment reports are available?
 
-2. **Multiple disk support**: The current design handles multiple secrets via
-   `secretMapping`, but should there be first-class support for multi-disk RAID
-   or ZFS configurations?
+## Implementation Status
 
-3. **Plugin architecture**: The design includes a plugin system for custom
-   backends. Should this be in v0.1 or deferred to v0.2?
+The reference implementation includes:
 
-4. **Upstream integration path**: Should this land in `nix-community` first
-   (as a flake) or go directly to `nixpkgs` (via `pkgs/by-name`)?
+- Rust CLI with age and SOPS backends.
+- Linux process hardening through `mlockall` and disabled core dumps.
+- tmpfs mounting, atomic file writes, zeroization, and cleanup.
+- NixOS module with `Before=disko.service` ordering.
+- VM tests for age and SOPS backends.
+- Manual documentation and nixos-anywhere examples.
 
----
-
-## Usage Example
-
-```nix
-# Full working example: encrypted root with disko + nix-secret-bridge
-{
-  services.nix-secret-bridge = {
-    enable = true;
-    backend = "age";
-    secretMapping.luks-root = {
-      encryptedFile = ./secrets/luks-root.age;
-      outputPath = "/run/secrets-bridge/luks-root";
-    };
-  };
-
-  disko.devices.disk.main = {
-    type = "disk";
-    device = "/dev/sda";
-    content.type = "gpt";
-    content.partitions = {
-      esp = {
-        size = "512M";
-        type = "EF00";
-        content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; };
-      };
-      root = {
-        size = "100%";
-        content = {
-          type = "luks";
-          name = "cryptroot";
-          settings.keyFile = "/run/secrets-bridge/luks-root";
-          settings.keyFileSize = 4096;
-          content = { type = "filesystem"; format = "ext4"; mountpoint = "/"; };
-        };
-      };
-    };
-  };
-}
-```
-
-Deploy:
-```bash
-export NIX_SECRET_BRIDGE_AGE_KEY=$(cat ~/.config/sops/age/keys.txt)
-nixos-anywhere --flake .#myhost root@192.168.1.100
-```
-
----
-
-## Contribution Roadmap
-
-| Phase | Timeline | Deliverable |
-|-------|----------|------------|
-| 1 | Week 1-3 | Rust crate: age/sops decryption, tmpfs mounting, CLI, unit tests |
-| 2 | Week 4-6 | NixOS module, systemd integration, disko ordering |
-| 3 | Week 7-9 | VM tests (2 backends), manual documentation |
-| 4 | Week 10-12 | Discourse Pre-RFC → feedback → formal RFC → PR submission |
-
----
-
-*Feedback welcome. Please reply with questions, concerns, or endorsements.
-I'm particularly interested in feedback on the security model and the
-interaction with existing tools.*
+The proposed next step is community review followed by a nixpkgs package PR and
+then a NixOS module PR once the interface has maintainer consensus.

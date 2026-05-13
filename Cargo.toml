@@ -4,16 +4,16 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Mutasem Kharma <mutasem@kharma.dev>"]
 license = "MIT"
-description = "Bootstrap secret orchestrator for NixOS: decrypt secrets during disk partitioning before system boot"
-repository = "https://github.com/nix-community/nix-secret-bridge"
+description = "Bootstrap secret bridge for NixOS disko LUKS keys"
+repository = "https://github.com/Mutasem-mk4/nix-secret-bridge"
 readme = "README.md"
 keywords = ["nixos", "secrets", "luks", "disko", "encryption"]
 categories = ["command-line-utilities", "cryptography"]
+rust-version = "1.74"
 
-# Abort on panic to prevent secret leakage through stack unwinding
 [profile.release]
 panic = "abort"
-lto = true
+lto = "thin"
 strip = true
 codegen-units = 1
 
@@ -21,42 +21,18 @@ codegen-units = 1
 panic = "abort"
 
 [dependencies]
-# CLI argument parsing
-clap = { version = "4", features = ["derive", "env"] }
-
-# age decryption (pure Rust implementation of age)
-rage = { version = "0.10", features = ["ssh"] }
-age = { version = "0.10", features = ["ssh"] }
-
-# Memory zeroization for secret data
-zeroize = { version = "1", features = ["derive"] }
-
-# Error handling
-anyhow = "1"
-thiserror = "2"
-
-# Logging (sanitized — never logs secrets)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Unix-specific: mlock, prctl, mount
-nix = { version = "0.29", features = ["mount", "mman", "process", "fs"] }
-
-# Serialization for config parsing
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-
-# Secure temporary files
-tempfile = "3"
-
-# Find executables in PATH (for SOPS backend)
-which = "7"
-
-# RAII cleanup guards (for temporary key files)
-scopeguard = "1"
+age = { version = "0.11.3", features = ["armor", "plugin", "ssh"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+nix = { version = "0.31.3", features = ["fs", "mman", "mount", "process"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+which = "8.0.2"
+zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
-tempfile = "3"
+assert_cmd = "2.1.1"
+predicates = "3.1.3"

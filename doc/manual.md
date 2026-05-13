@@ -1,67 +1,37 @@
-# Providing Secrets During Disk Encryption (nix-secret-bridge)
+# nix-secret-bridge
 
-## Problem Statement
+`nix-secret-bridge` provides encrypted bootstrap secrets to `disko` before the
+target NixOS system has booted. Its primary use case is an encrypted disk whose
+LUKS key is itself stored as an encrypted repository secret.
 
-When deploying NixOS with full-disk encryption via `disko`, the system needs
-access to LUKS passphrases or key files during the `luksFormat` phase. This
-phase occurs in the **installer environment** — either a live USB session or an
-SSH connection established by `nixos-anywhere` — **before** the target system
-has booted.
+## Bootstrap Paradox
 
-Existing NixOS secret management tools (`sops-nix`, `agenix`) are designed as
-systemd services that activate **after** boot. They cannot provide secrets
-during disk partitioning because:
+`disko` formats disks in the installer environment used by a live ISO or
+`nixos-anywhere`. Secret managers such as `sops-nix` and `agenix` normally run
+as services in the installed target system. That creates a timing problem:
+`disko` needs the LUKS key during `luksFormat`, but the usual secret service
+cannot run until after the encrypted root filesystem exists and has booted.
 
-1. The target root filesystem does not exist yet (it's being created)
-2. No systemd services from the target configuration are running
-3. The `/run/secrets/` paths these tools create don't exist in the installer
+`nix-secret-bridge` solves this by running in the installer environment. It
+decrypts an age or SOPS file in memory, mounts a dedicated tmpfs at
+`/run/secrets-bridge`, writes the plaintext key there with mode `0400`, and
+orders itself before `disko.service`. The cleanup service overwrites and unlinks
+the tmpfs files after `disko` finishes.
 
-This creates a **bootstrap paradox**: the encrypted disk cannot be created
-without the decrypted key, but the key management system cannot run until the
-disk exists and the system has booted.
+## Installation
 
-## Solution: nix-secret-bridge
-
-`nix-secret-bridge` is a purpose-built tool that operates in the installer
-environment. It:
-
-1. Reads encrypted secret files from your repository (age or SOPS format)
-2. Decrypts them using your existing master keys
-3. Places the decrypted data on a tmpfs mount (`/run/secrets-bridge/`)
-4. Integrates with `disko` via systemd service ordering
-
-After `disko` completes disk formatting, `nix-secret-bridge` securely cleans
-up: overwriting secret files with zeros, unlinking them, and unmounting the
-tmpfs.
-
-## Basic Usage
-
-### Step 1: Encrypt your LUKS key
-
-```bash
-# Generate a random LUKS key
-dd if=/dev/urandom of=luks-key bs=4096 count=1
-
-# Encrypt it with age
-age -r age1your-public-key... -o secrets/luks-key.age luks-key
-
-# Remove the plaintext key
-shred -u luks-key
-```
-
-### Step 2: Configure nix-secret-bridge + disko
+From a flake:
 
 ```nix
-# flake.nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     disko.url = "github:nix-community/disko";
-    nix-secret-bridge.url = "github:nix-community/nix-secret-bridge";
+    nix-secret-bridge.url = "github:Mutasem-mk4/nix-secret-bridge";
   };
 
-  outputs = { self, nixpkgs, disko, nix-secret-bridge, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+  outputs = { nixpkgs, disko, nix-secret-bridge, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
         disko.nixosModules.disko
@@ -73,55 +43,41 @@ shred -u luks-key
 }
 ```
 
+After inclusion in `nixpkgs`, use the NixOS module from the normal module set
+and `pkgs.nix-secret-bridge` as the package.
+
+## Basic Configuration
+
 ```nix
-# configuration.nix
 { config, ... }:
+
 {
-  # Configure nix-secret-bridge
   services.nix-secret-bridge = {
     enable = true;
     backend = "age";
+    masterKeyPath = "/run/nix-secret-bridge/age-identity.txt";
 
-    secretMapping = {
-      luks-key = {
-        encryptedFile = ./secrets/luks-key.age;
-        outputPath = "/run/secrets-bridge/luks-key";
-      };
+    secretMapping.luks = {
+      encryptedFile = ./secrets/luks-key.age;
+      outputPath = "/run/secrets-bridge/luks";
     };
-
-    diskoIntegration = true;
   };
 
-  # Configure disko to use the decrypted key
   disko.devices.disk.main = {
     type = "disk";
     device = "/dev/sda";
     content = {
       type = "gpt";
-      partitions = {
-        boot = {
-          size = "512M";
-          type = "EF00";
+      partitions.root = {
+        size = "100%";
+        content = {
+          type = "luks";
+          name = "cryptroot";
+          settings.keyFile = config.nix-secret-bridge.providers.age.paths.luks;
           content = {
             type = "filesystem";
-            format = "vfat";
-            mountpoint = "/boot";
-          };
-        };
-        luks = {
-          size = "100%";
-          content = {
-            type = "luks";
-            name = "cryptroot";
-            settings = {
-              keyFile = "/run/secrets-bridge/luks-key";
-              keyFileSize = 4096;
-            };
-            content = {
-              type = "filesystem";
-              format = "ext4";
-              mountpoint = "/";
-            };
+            format = "ext4";
+            mountpoint = "/";
           };
         };
       };
@@ -130,106 +86,89 @@ shred -u luks-key
 }
 ```
 
-### Step 3: Deploy with nixos-anywhere
+The encrypted `luks-key.age` file may be copied into the Nix store. The
+plaintext age identity must not be stored in the source tree or imported as a
+Nix path. Place it under `/run` on the installer host before running
+`nixos-anywhere`.
+
+## Deploying with nixos-anywhere
 
 ```bash
-# Provide the age identity for decryption
-export NIX_SECRET_BRIDGE_AGE_KEY=$(cat ~/.config/sops/age/keys.txt)
-
-nixos-anywhere --flake .#myhost root@target-machine
+export NIX_SECRET_BRIDGE_AGE_KEY="$(cat ~/.config/sops/age/keys.txt)"
+./examples/deploy.sh .#host root@192.0.2.10
 ```
 
-## Advanced: Using a YubiKey
+The example script transfers the local environment variable to
+`/run/nix-secret-bridge/age-identity.txt` on the target over SSH, runs
+`nixos-anywhere`, and removes the remote key file afterward.
 
-If your age identity is stored on a YubiKey (via `age-plugin-yubikey`):
+## SOPS Backend
 
-```nix
-services.nix-secret-bridge = {
-  enable = true;
-  backend = "age";
-  secretMapping.luks-key = {
-    encryptedFile = ./secrets/luks-key.age;
-    outputPath = "/run/secrets-bridge/luks-key";
-  };
-  # No masterKeyPath needed — the YubiKey plugin handles it
-};
-```
-
-Then deploy with physical access to the YubiKey:
-
-```bash
-nixos-anywhere --flake .#myhost root@target-machine
-# You'll be prompted to touch the YubiKey during decryption
-```
-
-## Advanced: Using SOPS
+For SOPS, use a SOPS binary file for the LUKS key and set the backend:
 
 ```nix
 services.nix-secret-bridge = {
   enable = true;
   backend = "sops";
-
-  secretMapping.luks-key = {
+  masterKeyPath = "/run/nix-secret-bridge/age-identity.txt";
+  secretMapping.luks = {
     encryptedFile = ./secrets/luks-key.sops;
-    outputPath = "/run/secrets-bridge/luks-key";
+    outputPath = "/run/secrets-bridge/luks";
   };
-
-  provider.masterKeyPath = "/tmp/age-identity.txt";
 };
 ```
 
+The SOPS backend invokes `sops --decrypt --output-type binary`. The module adds
+`pkgs.sops` to the installer environment when any mapping uses the SOPS backend.
+
+## Advanced Key Sources
+
+YubiKey-backed age identities work when the identity file contains an
+`age-plugin-yubikey` identity and the corresponding plugin is available in the
+installer environment. This keeps the same interface: set `masterKeyPath` to the
+plugin identity file and ensure the hardware token is accessible during
+deployment.
+
+TPM2 sealing is intentionally not part of the first implementation. TPM2 is
+better suited for subsequent boots or redeployments after the target hardware
+has established sealed credentials. A future module can add a TPM2 provider
+without changing the tmpfs handoff contract used by `disko`.
+
+## Options
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `services.nix-secret-bridge.enable` | boolean | `false` | Enables the bridge service. |
+| `services.nix-secret-bridge.package` | package | `pkgs.nix-secret-bridge` | Package providing the CLI. |
+| `services.nix-secret-bridge.backend` | `"age"` or `"sops"` | `"age"` | Default backend for mappings. |
+| `services.nix-secret-bridge.secretMapping` | attribute set | `{}` | Maps secret names to encrypted files and tmpfs output paths. |
+| `services.nix-secret-bridge.secretMapping.<name>.encryptedFile` | path or string | required | Encrypted age or SOPS source. |
+| `services.nix-secret-bridge.secretMapping.<name>.outputPath` | string | required | Plaintext tmpfs path under `mountBase`. |
+| `services.nix-secret-bridge.secretMapping.<name>.backend` | null or enum | `null` | Per-secret backend override. |
+| `services.nix-secret-bridge.masterKeyPath` | null or string | `null` | Runtime path to the age identity file. |
+| `services.nix-secret-bridge.environmentFile` | null or string | `/run/nix-secret-bridge/nix-secret-bridge.env` | Optional systemd environment file for key variables. |
+| `services.nix-secret-bridge.diskoIntegration` | boolean | `true` | Adds `Before=disko.service` and `RequiredBy=disko.service`. |
+| `services.nix-secret-bridge.cleanupAfterDisko` | boolean | `true` | Starts cleanup after `disko.service`. |
+| `services.nix-secret-bridge.mountBase` | string | `/run/secrets-bridge` | Dedicated tmpfs mount for plaintext secrets. |
+| `config.nix-secret-bridge.providers.age.paths` | attribute set | generated | Output paths for age-backed mappings. |
+| `config.nix-secret-bridge.providers.sops.paths` | attribute set | generated | Output paths for SOPS-backed mappings. |
+
 ## Security Considerations
 
-### What IS safe
+Plaintext bootstrap secrets are runtime data. Do not put them in Nix values,
+derivations, flake inputs, or files that Nix will copy to `/nix/store`.
 
-- **Encrypted files in `/nix/store`**: The `.age` or `.sops` files in your
-  repository are encrypted. They can safely exist in the Nix store.
-- **The `nix-secret-bridge` binary in `/nix/store`**: It's just a program,
-  containing no secrets.
+The bridge enforces these properties:
 
-### What is NOT written to disk
+- Decrypted data is written only under the configured tmpfs mount.
+- Output paths outside `mountBase` are rejected by the CLI and module.
+- Secret files are created atomically with parent directories mode `0700` and
+  files mode `0400`.
+- Replaced and cleaned-up files are overwritten with zeros before unlinking.
+- Decrypted buffers use `zeroize::Zeroizing`.
+- The process disables core dumps and calls `mlockall` on Linux.
+- The systemd unit suppresses stdout and only logs sanitized errors.
 
-- **Decrypted key material**: Only exists on tmpfs and in process memory.
-  Never written to any persistent filesystem.
-- **Master keys**: Read from environment variables or ephemeral files
-  provided via SSH. Never part of a Nix derivation.
-
-### Memory protection
-
-- Process memory is locked with `mlock()` to prevent swapping
-- Core dumps are disabled via `prctl(PR_SET_DUMPABLE, 0)`
-- All decrypted byte buffers are zeroized on drop (using the `zeroize` crate)
-- The Rust binary is compiled with `panic = "abort"` to prevent stack unwinding
-
-### Cleanup
-
-After `disko` finishes:
-
-1. Each secret file is overwritten with zeros
-2. Files are unlinked (deleted)
-3. The tmpfs is unmounted
-4. The mount point directory is removed
-
-This cleanup runs automatically via `nix-secret-bridge-cleanup.service`,
-which is ordered after `disko.service`.
-
-## Troubleshooting
-
-### "Master key not found"
-
-Ensure one of these is set:
-- `NIX_SECRET_BRIDGE_AGE_KEY` environment variable
-- `NIX_SECRET_BRIDGE_MASTER_KEY_FILE` environment variable  
-- `services.nix-secret-bridge.provider.masterKeyPath` in your config
-
-### "sops binary not found"
-
-Add `sops` to your installer environment:
-```nix
-environment.systemPackages = [ pkgs.sops ];
-```
-
-### "Failed to mount tmpfs"
-
-The tool requires root privileges. When using `nixos-anywhere`, this is
-automatic. For manual installs, run with `sudo`.
+Encrypted files may be stored in the Nix store. Master keys and decrypted LUKS
+keys must be delivered at runtime through `/run`, SSH, or a protected hardware
+provider.
