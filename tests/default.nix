@@ -22,7 +22,7 @@ let
   prepareAgeSecret = pkgs.writeShellScript "prepare-age-secret" ''
     set -eu
     install -m 0700 -d ${runtimeDir}
-    ${pkgs.openssl}/bin/openssl rand -hex 32 > ${runtimeDir}/plain
+    ${pkgs.openssl}/bin/openssl rand -hex 64 | ${pkgs.coreutils}/bin/head -c 128 > ${runtimeDir}/plain
     ${pkgs.age}/bin/age --encrypt \
       --recipient ${lib.escapeShellArg testAgePublicKey} \
       --output ${runtimeDir}/luks-key.age \
@@ -32,7 +32,7 @@ let
   prepareSopsSecret = pkgs.writeShellScript "prepare-sops-secret" ''
     set -eu
     install -m 0700 -d ${runtimeDir}
-    ${pkgs.openssl}/bin/openssl rand -hex 32 > ${runtimeDir}/plain
+    ${pkgs.openssl}/bin/openssl rand -hex 64 | ${pkgs.coreutils}/bin/head -c 128 > ${runtimeDir}/plain
     ${pkgs.sops}/bin/sops --encrypt \
       --age ${lib.escapeShellArg testAgePublicKey} \
       --input-type binary \
@@ -123,7 +123,10 @@ let
           pkgs.e2fsprogs
           pkgs.util-linux
         ];
-        serviceConfig.Type = "oneshot";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
         script = ''
           ${config.system.build.diskoScript}
         '';
@@ -158,7 +161,7 @@ let
 
     machine.succeed("cryptsetup isLuks /dev/vdb1")
     machine.succeed("if [ ! -b /dev/mapper/crypttest ]; then cryptsetup open --key-file ${bridgePath} /dev/vdb1 crypttest; fi; test -b /dev/mapper/crypttest")
-    machine.succeed("if grep -R -F -- \"$(cat ${runtimeDir}/plain)\" /nix/store >/tmp/store-grep.log 2>&1; then exit 1; else test $? -eq 1; fi")
+    machine.succeed("secret=$(cat ${runtimeDir}/plain); matches=$(find /nix/store -xdev -type f -size -16M -exec grep -I -F -l -- \"$secret\" {} + 2>/tmp/store-grep.err || true); test -z \"$matches\"")
 
     machine.succeed("nix-secret-bridge cleanup --mount-base /run/secrets-bridge")
     machine.fail("test -e ${bridgePath}")
