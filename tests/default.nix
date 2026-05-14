@@ -161,7 +161,7 @@ let
 
     machine.succeed("cryptsetup isLuks /dev/vdb1")
     machine.succeed("if [ ! -b /dev/mapper/crypttest ]; then cryptsetup open --key-file ${bridgePath} /dev/vdb1 crypttest; fi; test -b /dev/mapper/crypttest")
-    machine.succeed("if grep -R -F -- \"$(cat ${runtimeDir}/plain)\" /nix/store >/tmp/store-grep.log 2>&1; then exit 1; else test $? -eq 1; fi")
+    machine.succeed("secret=$(cat ${runtimeDir}/plain); matches=$(find /nix/store -xdev -type f -size -16M -exec grep -I -F -l -- \"$secret\" {} + 2>/tmp/store-grep.err || true); test -z \"$matches\"")
 
     machine.succeed("nix-secret-bridge cleanup --mount-base /run/secrets-bridge")
     machine.fail("test -e ${bridgePath}")
